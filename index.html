@@ -585,11 +585,13 @@ function refreshTotals(){
 function initPengaturan(){
   const money = el => el.addEventListener('input', () => { const n = parseMoney(el.value); el.value = n ? fmtNum(n) : ''; });
   const inc = $('#inc'); money(inc);
+  inc.addEventListener('input', () => { S.income = parseMoney(inc.value); refreshTotals(); });
   inc.addEventListener('change', () => { S.income = parseMoney(inc.value); save(); refreshTotals(); toast('Pemasukan disimpan'); });
   $('#ps').addEventListener('change', e => { S.period.start = isDate(e.target.value) ? e.target.value : ''; save(); toast('Periode disimpan'); });
   $('#pe').addEventListener('change', e => { S.period.end = isDate(e.target.value) ? e.target.value : ''; save(); toast('Periode disimpan'); });
   document.querySelectorAll('[data-b]').forEach(el => {
     money(el);
+    el.addEventListener('input', () => { const s = subById(el.dataset.b); if(s){ s.budget = parseMoney(el.value); refreshTotals(); } });
     el.addEventListener('change', () => { const s = subById(el.dataset.b); s.budget = parseMoney(el.value); save(); refreshTotals(); toast('Budget disimpan'); });
   });
   document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
