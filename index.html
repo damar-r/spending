@@ -309,20 +309,22 @@ function checkState(subId, amount, date, excl){
     track:`<i class="t-use" style="width:${Math.max(remain, 0) / cap * 100}%"></i><i class="t-over" style="width:${(amount - Math.max(remain, 0)) / cap * 100}%"></i>`,
     legend:'<span>▨ dana tersedia</span><span style="color:var(--bad)">▮ kekurangan</span>'};
 }
-function subOptions(sel, excl){
-  const m = spentMap(excl), by = new Map();
-  for(const s of S.subs){ if(!by.has(s.cat)) by.set(s.cat, []); by.get(s.cat).push(s); }
-  let out = '<option value="">Pilih sumber dana…</option>';
-  for(const [cat, list] of by)
-    out += `<optgroup label="${esc(cat)}">` + list.map(s => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${esc(s.name)} · sisa ${rp(s.budget - (m[s.id] || 0))}</option>`).join('') + '</optgroup>';
-  return out;
+function catOptions(selCat){
+  const cats = [...new Set(S.subs.map(s => s.cat))];
+  return '<option value="">Pilih kategori…</option>' + cats.map(c => `<option value="${esc(c)}"${c === selCat ? ' selected' : ''}>${esc(c)}</option>`).join('');
+}
+function subOptions(sel, excl, cat){
+  if(!cat) return '<option value="">Pilih kategori dulu…</option>';
+  const m = spentMap(excl);
+  return '<option value="">Pilih sumber dana…</option>' + S.subs.filter(s => s.cat === cat).map(s => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${esc(s.name)} · sisa ${rp(s.budget - (m[s.id] || 0))}</option>`).join('');
 }
 function txFormHTML(p, v){
   return `
   <div class="fld" id="${p}f-name"><label for="${p}name"><span>Nama pembelian</span></label><input id="${p}name" type="text" maxlength="80" autocomplete="off" placeholder="mis. Belanja mingguan" value="${esc(v.name || '')}"><p class="ferr" hidden></p></div>
   <div class="fld" id="${p}f-price"><label for="${p}price"><span>Harga</span></label><div class="money"><i>Rp</i><input id="${p}price" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="${v.amount ? fmtNum(v.amount) : ''}"></div><p class="ferr" hidden></p></div>
   <div class="fld" id="${p}f-date"><label for="${p}date"><span>Tanggal</span></label><input id="${p}date" type="date" value="${esc(v.date)}"><p class="ferr" hidden></p></div>
-  <div class="fld" id="${p}f-sub"><label for="${p}sub"><span>Sumber dana</span></label><select id="${p}sub">${subOptions(v.sub, v.excl)}</select><p class="ferr" hidden></p></div>
+  <div class="fld" id="${p}f-cat"><label for="${p}cat"><span>Kategori</span></label><select id="${p}cat">${catOptions(v.sub && subById(v.sub) ? subById(v.sub).cat : '')}</select></div>
+  <div class="fld" id="${p}f-sub"><label for="${p}sub"><span>Sumber dana</span></label><select id="${p}sub">${subOptions(v.sub, v.excl, v.sub && subById(v.sub) ? subById(v.sub).cat : '')}</select><p class="ferr" hidden></p></div>
   <div id="${p}check" class="gauge" role="status"></div>`;
 }
 function bindTxForm(p, excl){
@@ -335,6 +337,7 @@ function bindTxForm(p, excl){
   };
   g('price').addEventListener('input', () => { const n = parseMoney(g('price').value); g('price').value = n ? fmtNum(n) : ''; clearErr(p, 'price'); upd(); });
   g('name').addEventListener('input', () => clearErr(p, 'name'));
+  g('cat').addEventListener('change', () => { g('sub').innerHTML = subOptions('', excl, g('cat').value); clearErr(p, 'sub'); upd(); });
   g('sub').addEventListener('change', () => { clearErr(p, 'sub'); upd(); });
   g('date').addEventListener('change', () => { clearErr(p, 'date'); upd(); });
   upd();
