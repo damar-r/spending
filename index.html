@@ -46,7 +46,7 @@ h3{font-size:.95rem;margin:0}
 /* form */
 .fld{display:block;margin:0 0 14px}
 .fld>span{display:block;font-size:.88rem;font-weight:600;margin:0 0 6px}
-input[type=text],input[type=date],input[type=search],select,textarea{width:100%;min-height:48px;border:1.5px solid var(--line);background:var(--field);border-radius:12px;padding:10px 12px;font-size:16px;appearance:none;-webkit-appearance:none}
+input[type=text],input[type=password],input[type=date],input[type=search],select,textarea{width:100%;min-height:48px;border:1.5px solid var(--line);background:var(--field);border-radius:12px;padding:10px 12px;font-size:16px;appearance:none;-webkit-appearance:none}
 select{background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 20px) 21px,calc(100% - 14px) 21px;background-size:6px 6px;background-repeat:no-repeat;padding-right:36px}
 input:focus,select:focus,textarea:focus,button:focus-visible,summary:focus-visible,a:focus-visible{outline:3px solid var(--brand);outline-offset:1px;border-color:var(--brand)}
 .money{display:flex;align-items:center;border:1.5px solid var(--line);background:var(--field);border-radius:12px;min-height:48px}
@@ -143,7 +143,12 @@ details[open]>summary .cat-name::before{transform:rotate(45deg)}
 .list-btns{display:grid;gap:8px}
 .hint{font-size:.85rem;color:var(--muted);margin:8px 0 0}
 .total-line{display:flex;justify-content:space-between;font-weight:700;padding-top:10px;margin-top:6px;border-top:1px solid var(--line)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.mv-hint{font-size:.85rem;color:var(--muted);margin:0 0 12px}
+.cat-act{padding:12px 0 4px}
+.sub-act{margin-top:10px}
+.sync-ok{color:var(--ok)}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+.grid2 input[type=date]{min-width:0}
 
 /* nav */
 nav{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:100%;max-width:520px;display:grid;grid-template-columns:repeat(4,1fr);background:var(--card);border-top:1px solid var(--line);padding:6px 6px calc(6px + env(safe-area-inset-bottom));z-index:5}
@@ -181,7 +186,7 @@ nav a[aria-current=page]{color:var(--brand);background:var(--brand-soft)}
 /* ========== data ========== */
 const KEY = 'pengeluaran.v1';
 let storageOK = true;
-const blank = () => ({v:1, income:0, period:{start:'',end:''}, subs:[], tx:[], lastBackup:0});
+const blank = () => ({v:1, income:0, period:{start:'',end:''}, subs:[], tx:[], moves:[], lastBackup:0});
 const num = x => Math.max(0, Math.round(Number(x) || 0));
 const isDate = s => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -204,6 +209,13 @@ function normalize(d){
     if(!t || !t.name || num(t.amount) <= 0 || !isDate(t.date) || !seen.has(String(t.sub))){ lastDropped++; continue; }
     o.tx.push({id:String(t.id || uid()), name:String(t.name), amount:num(t.amount), date:t.date, sub:String(t.sub), ts:num(t.ts) || Date.now()});
   }
+  for(const m of (Array.isArray(d.moves) ? d.moves : [])){
+    if(!m || !m.id || !m.to || !isDate(m.date) || !Array.isArray(m.parts) || !m.parts.length) continue;
+    const parts = m.parts.filter(p => p && p.sub && num(p.amount) > 0).map(p => ({sub:String(p.sub), name:String(p.name || ''), amount:num(p.amount)}));
+    const total = parts.reduce((a, p) => a + p.amount, 0);
+    if(!parts.length || total !== num(m.amount)) continue;
+    o.moves.push({id:String(m.id), ts:num(m.ts) || Date.now(), date:m.date, amount:total, to:String(m.to), toName:String(m.toName || ''), parts});
+  }
   return o;
 }
 function load(){
@@ -217,6 +229,95 @@ function load(){
 function save(){
   try{ localStorage.setItem(KEY, JSON.stringify(S)); storageOK = true; }
   catch(e){ storageOK = false; toast('Tidak bisa menyimpan di browser ini', 'err'); }
+}
+
+
+/* ========== sinkron ke Google Sheets (satu arah: app -> Sheet) ========== */
+const SKEY = 'pengeluaran.sync';
+const SYNC0 = () => ({url:'', key:'', queue:[], last:0, err:''});
+let SYNC = SYNC0(), syncBusy = false;
+try{ const r = JSON.parse(localStorage.getItem(SKEY) || 'null'); if(r && typeof r === 'object') SYNC = {...SYNC0(), ...r, queue:Array.isArray(r.queue) ? r.queue : []}; }catch(e){}
+const syncOn = () => !!(SYNC.url && SYNC.key);
+function saveSync(){ try{ localStorage.setItem(SKEY, JSON.stringify(SYNC)); }catch(e){} }
+const txRow = t => { const s = subById(t.sub); return {id:t.id, date:t.date, name:t.name, cat:s ? s.cat : '', sub:s ? s.name : '', amount:t.amount, ts:t.ts}; };
+const snapshot = () => ({subs:S.subs.map(x => ({cat:x.cat, name:x.name, budget:x.budget})), tx:S.tx.map(txRow), income:S.income, period:S.period});
+const opId = o => o.a === 'put' ? o.row.id : o.id;
+function syncQueue(op){
+  if(!syncOn()) return;
+  if(op.a === 'full') SYNC.queue = [op];
+  else { SYNC.queue = SYNC.queue.filter(x => x.a === 'full' || opId(x) !== opId(op)); SYNC.queue.push(op); }
+  saveSync(); syncFlush();
+}
+const syncPut = t => syncQueue({a:'put', row:txRow(t)});
+const syncDel = id => syncQueue({a:'del', id});
+const syncFull = () => syncQueue({a:'full'});
+async function syncSend(payload){
+  const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 20000);
+  try{
+    const res = await fetch(SYNC.url, {method:'POST', body:JSON.stringify({key:SYNC.key, ...payload}), signal:ctl.signal});
+    let j; try{ j = await res.json(); }catch(e){ throw new Error('Balasan tidak dikenali. Cek alamat Web App dan akses "Siapa saja"'); }
+    if(!j.ok) throw new Error(j.error === 'kunci' ? 'Kunci rahasia tidak cocok' : (j.error || 'Gagal'));
+  }catch(e){
+    if(e.name === 'AbortError') throw new Error('Waktu habis');
+    if(e instanceof TypeError) throw new Error('Tidak ada koneksi');
+    throw e;
+  }finally{ clearTimeout(to); }
+}
+async function syncFlush(){
+  if(syncBusy || !syncOn() || !SYNC.queue.length){ syncUI(); return; }
+  if(navigator.onLine === false){ SYNC.err = 'Offline'; saveSync(); syncUI(); return; }
+  syncBusy = true; syncUI();
+  try{
+    while(SYNC.queue.length){
+      const op = SYNC.queue[0];
+      await syncSend(op.a === 'full' ? {action:'sync', ...snapshot()} : op.a === 'put' ? {action:'put', row:op.row} : {action:'del', id:op.id});
+      const i = SYNC.queue.indexOf(op); if(i >= 0) SYNC.queue.splice(i, 1);
+      SYNC.last = Date.now(); SYNC.err = ''; saveSync();
+    }
+  }catch(e){ SYNC.err = e.message; saveSync(); }
+  syncBusy = false; syncUI();
+}
+function syncText(){
+  if(!syncOn()) return '';
+  const n = SYNC.queue.length;
+  if(syncBusy) return 'Mengirim ke Sheets…';
+  if(n) return n + ' perubahan menunggu dikirim' + (SYNC.err ? ' · ' + SYNC.err : '');
+  return SYNC.last ? 'Sheets tersinkron · ' + new Date(SYNC.last).toLocaleTimeString('id-ID', {hour:'2-digit', minute:'2-digit'}) : 'Sheets terhubung';
+}
+function syncUI(){
+  const bad = syncOn() && SYNC.queue.length > 0 && !!SYNC.err && !syncBusy;
+  document.querySelectorAll('[data-sync]').forEach(el => { el.textContent = syncText(); el.classList.toggle('neg', bad); el.classList.toggle('sync-ok', syncOn() && !SYNC.queue.length && !syncBusy); });
+}
+function syncSection(){
+  return `<section class="card"><h2>Sinkron ke Google Sheets</h2>
+    <p class="hint" style="margin:0 0 12px">Setiap pembelian yang dikirim, diubah, atau dihapus ikut disalin ke Google Sheet Anda. Arahnya satu sisi: mengubah isi Sheet tidak mengubah data di aplikasi.</p>
+    ${syncOn() ? `<p class="hint" data-sync style="margin:0 0 12px;font-weight:600"></p>` : ''}
+    <div class="fld"><label for="sy-url"><span>Alamat Web App (diakhiri /exec)</span></label><input id="sy-url" type="text" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(SYNC.url)}"></div>
+    <div class="fld"><label for="sy-key"><span>Kunci rahasia</span></label><input id="sy-key" type="password" autocomplete="off" placeholder="Sama dengan KUNCI di Code.gs" value="${esc(SYNC.key)}"></div>
+    <div class="list-btns">
+      <button class="btn" id="sy-save">${syncOn() ? 'Simpan dan tes koneksi' : 'Hubungkan'}</button>
+      ${syncOn() ? '<button class="btn ghost" id="sy-full">Kirim ulang semua data ke Sheet</button><button class="btn ghost dangertxt" id="sy-off">Putuskan sambungan</button>' : ''}
+    </div>
+    <p class="hint">Pengaturan ini hanya tersimpan di HP ini dan tidak ikut di cadangan JSON.</p>
+  </section>`;
+}
+function initSync(){
+  const save = $('#sy-save'); if(!save) return;
+  save.onclick = async () => {
+    const url = $('#sy-url').value.trim(), key = $('#sy-key').value.trim();
+    if(!/^https:\/\/script\.google\.com\/(a\/macros\/[^/]+|macros)\/s\/[^/\s]+\/exec$/.test(url)){ toast('Alamat harus diawali https://script.google.com dan diakhiri /exec', 'err'); return; }
+    if(key.length < 8){ toast('Kunci rahasia minimal 8 karakter', 'err'); return; }
+    const prev = {url:SYNC.url, key:SYNC.key}; SYNC.url = url; SYNC.key = key;
+    save.disabled = true; save.textContent = 'Menguji…';
+    try{ await syncSend({action:'ping'}); }
+    catch(e){ SYNC.url = prev.url; SYNC.key = prev.key; save.disabled = false; save.textContent = syncOn() ? 'Simpan dan tes koneksi' : 'Hubungkan'; toast('Gagal terhubung: ' + e.message, 'err'); return; }
+    saveSync(); toast('Terhubung. Mengirim semua data…'); syncFull(); render(true);
+  };
+  const full = $('#sy-full'); if(full) full.onclick = () => { syncFull(); toast('Mengirim semua data…'); };
+  const off = $('#sy-off'); if(off) off.onclick = async () => {
+    if(!(await ask({title:'Putuskan sambungan?', msg:'Aplikasi berhenti menyalin ke Google Sheet. Isi Sheet yang sudah ada tidak dihapus.', ok:'Putuskan', danger:true}))) return;
+    SYNC = SYNC0(); saveSync(); toast('Sambungan diputus'); render(true);
+  };
 }
 
 /* ========== helpers ========== */
@@ -309,22 +410,20 @@ function checkState(subId, amount, date, excl){
     track:`<i class="t-use" style="width:${Math.max(remain, 0) / cap * 100}%"></i><i class="t-over" style="width:${(amount - Math.max(remain, 0)) / cap * 100}%"></i>`,
     legend:'<span>▨ dana tersedia</span><span style="color:var(--bad)">▮ kekurangan</span>'};
 }
-function catOptions(selCat){
-  const cats = [...new Set(S.subs.map(s => s.cat))];
-  return '<option value="">Pilih kategori…</option>' + cats.map(c => `<option value="${esc(c)}"${c === selCat ? ' selected' : ''}>${esc(c)}</option>`).join('');
-}
-function subOptions(sel, excl, cat){
-  if(!cat) return '<option value="">Pilih kategori dulu…</option>';
-  const m = spentMap(excl);
-  return '<option value="">Pilih sumber dana…</option>' + S.subs.filter(s => s.cat === cat).map(s => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${esc(s.name)} · sisa ${rp(s.budget - (m[s.id] || 0))}</option>`).join('');
+function subOptions(sel, excl){
+  const m = spentMap(excl), by = new Map();
+  for(const s of S.subs){ if(!by.has(s.cat)) by.set(s.cat, []); by.get(s.cat).push(s); }
+  let out = '<option value="">Pilih sumber dana…</option>';
+  for(const [cat, list] of by)
+    out += `<optgroup label="${esc(cat)}">` + list.map(s => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${esc(s.name)} · sisa ${rp(s.budget - (m[s.id] || 0))}</option>`).join('') + '</optgroup>';
+  return out;
 }
 function txFormHTML(p, v){
   return `
   <div class="fld" id="${p}f-name"><label for="${p}name"><span>Nama pembelian</span></label><input id="${p}name" type="text" maxlength="80" autocomplete="off" placeholder="mis. Belanja mingguan" value="${esc(v.name || '')}"><p class="ferr" hidden></p></div>
   <div class="fld" id="${p}f-price"><label for="${p}price"><span>Harga</span></label><div class="money"><i>Rp</i><input id="${p}price" type="text" inputmode="numeric" autocomplete="off" placeholder="0" value="${v.amount ? fmtNum(v.amount) : ''}"></div><p class="ferr" hidden></p></div>
   <div class="fld" id="${p}f-date"><label for="${p}date"><span>Tanggal</span></label><input id="${p}date" type="date" value="${esc(v.date)}"><p class="ferr" hidden></p></div>
-  <div class="fld" id="${p}f-cat"><label for="${p}cat"><span>Kategori</span></label><select id="${p}cat">${catOptions(v.sub && subById(v.sub) ? subById(v.sub).cat : '')}</select></div>
-  <div class="fld" id="${p}f-sub"><label for="${p}sub"><span>Sumber dana</span></label><select id="${p}sub">${subOptions(v.sub, v.excl, v.sub && subById(v.sub) ? subById(v.sub).cat : '')}</select><p class="ferr" hidden></p></div>
+  <div class="fld" id="${p}f-sub"><label for="${p}sub"><span>Sumber dana</span></label><select id="${p}sub">${subOptions(v.sub, v.excl)}</select><p class="ferr" hidden></p></div>
   <div id="${p}check" class="gauge" role="status"></div>`;
 }
 function bindTxForm(p, excl){
@@ -337,7 +436,6 @@ function bindTxForm(p, excl){
   };
   g('price').addEventListener('input', () => { const n = parseMoney(g('price').value); g('price').value = n ? fmtNum(n) : ''; clearErr(p, 'price'); upd(); });
   g('name').addEventListener('input', () => clearErr(p, 'name'));
-  g('cat').addEventListener('change', () => { g('sub').innerHTML = subOptions('', excl, g('cat').value); clearErr(p, 'sub'); upd(); });
   g('sub').addEventListener('change', () => { clearErr(p, 'sub'); upd(); });
   g('date').addEventListener('change', () => { clearErr(p, 'date'); upd(); });
   upd();
@@ -390,7 +488,7 @@ function viewCatat(){
   const c = calc(), left = c.totalBudget - c.totalSpent, dl = daysLeft();
   const dlText = dl == null ? '' : dl > 0 ? ` · ${dl} hari lagi` : dl === 0 ? ' · hari terakhir' : ' · periode berakhir';
   const recent = [...S.tx].sort((a, b) => b.ts - a.ts).slice(0, 5);
-  return `<h1>Catat pengeluaran</h1><p class="sub-h">${esc(periodText())}${dlText}</p>${storageBanner()}
+  return `<h1>Catat pengeluaran</h1><p class="sub-h">${esc(periodText())}${dlText}</p>${syncOn() ? '<p class="hint" data-sync style="margin:-8px 0 12px"></p>' : ''}${storageBanner()}
   <form id="f" class="card" novalidate>
     ${txFormHTML('a_', {date:ui.date || today()})}
     <button class="btn block" type="submit">Kirim</button>
@@ -407,7 +505,7 @@ function initCatat(){
     const v = get(), bad = validateTx(v);
     if(bad){ showErr('a_', bad[0], bad[1]); return; }
     if(!(await confirmOverspend(v, null))) return;
-    S.tx.push({id:uid(), ...v, ts:Date.now()}); save();
+    const nt = {id:uid(), ...v, ts:Date.now()}; S.tx.push(nt); save(); syncPut(nt);
     ui.date = v.date; toast('Tersimpan: ' + v.name); render(true);
   });
 }
@@ -441,8 +539,10 @@ function viewRingkasan(){
   </section>
   ${over.length ? `<div class="notice bad"><b>Melebihi budget:</b> ${names(over)}</div>` : ''}
   ${near.length ? `<div class="notice"><b>Hampir habis (85% atau lebih):</b> ${names(near)}</div>` : ''}
+  <button class="btn block" data-move="" style="margin:0 0 4px">Tambah atau pindahkan dana</button>
   <div class="sec"><h2>Per kategori</h2><button class="btn ghost sm" id="toggleAll">${ui.open.size ? 'Tutup semua' : 'Buka semua'}</button></div>
-  ${c.cats.map(cat => catCard(cat, c.totalBudget)).join('')}`;
+  ${c.cats.map(cat => catCard(cat, c.totalBudget)).join('')}
+  ${moveHistory()}`;
 }
 function catCard(c, total){
   const st = stateOf(c.spent, c.budget), left = c.budget - c.spent;
@@ -451,17 +551,124 @@ function catCard(c, total){
       ${bar(c.spent, c.budget)}
       <div class="stats">${stat('Total dana', rp(c.budget))}${stat('% alokasi', fmtPct(pct(c.budget, total)))}${stat('Pengeluaran', rp(c.spent))}${stat('% terpakai', fmtPct(pct(c.spent, c.budget)))}</div>
     </summary>
-    <div class="subs">${c.subs.map(s => subRow(s, total)).join('')}</div></details>`;
+    <div class="subs"><div class="cat-act"><button class="btn ghost sm" data-move-cat="${esc(c.name)}">Tambah dana ke ${esc(c.name)}</button></div>${c.subs.map(s => subRow(s, total)).join('')}</div></details>`;
 }
 function subRow(s, total){
   const st = stateOf(s.spent, s.budget), left = s.budget - s.spent;
   return `<div class="sub"><div class="sub-top"><span class="nm">${esc(s.name)}${stateLabel[st] ? ` <small class="tag s-${st}">${stateLabel[st]}</small>` : ''}</span><span class="remain ${left < 0 ? 'neg' : ''}">Tersisa ${rp(left)}</span></div>
     ${bar(s.spent, s.budget)}
-    <div class="stats">${stat('Total dana', rp(s.budget))}${stat('% alokasi', fmtPct(pct(s.budget, total)))}${stat('Pengeluaran', rp(s.spent))}${stat('% terpakai', fmtPct(pct(s.spent, s.budget)))}</div></div>`;
+    <div class="stats">${stat('Total dana', rp(s.budget))}${stat('% alokasi', fmtPct(pct(s.budget, total)))}${stat('Pengeluaran', rp(s.spent))}${stat('% terpakai', fmtPct(pct(s.spent, s.budget)))}</div><div class="sub-act"><button class="btn ghost sm" data-move-sub="${esc(s.id)}">Tambah dana</button></div></div>`;
 }
 function initRingkasan(){
+  $('#view').onclick = e => {
+    const mv = e.target.closest('[data-move],[data-move-cat],[data-move-sub]'), un = e.target.closest('[data-undo]');
+    if(un){ undoMove(un.dataset.undo); return; }
+    if(!mv) return;
+    if(mv.dataset.moveSub) moveSheet('', mv.dataset.moveSub);
+    else if(mv.dataset.moveCat) moveSheet(mv.dataset.moveCat, '');
+    else moveSheet('', '');
+  };
   const t = $('#toggleAll');
   if(t) t.onclick = () => { if(ui.open.size) ui.open.clear(); else S.subs.forEach(s => ui.open.add(s.cat)); render(true); };
+}
+
+
+/* ========== pindah dana antar sub-kategori ========== */
+const sisaOf = (id, m) => { const s = subById(id); return s ? s.budget - ((m || spentMap())[id] || 0) : 0; };
+function planMove(src, tid, amount){
+  const m = spentMap();
+  const pool = S.subs.filter(s => s.id !== tid && (src.startsWith('cat:') ? s.cat === src.slice(4) : s.id === src.slice(4)))
+    .map(s => ({s, sisa:Math.max(0, s.budget - (m[s.id] || 0))})).filter(x => x.sisa > 0);
+  const avail = pool.reduce((a, x) => a + x.sisa, 0);
+  if(!amount) return {ok:false, avail, parts:[]};
+  if(amount > avail) return {ok:false, avail, parts:[], short:amount - avail};
+  const parts = pool.map(x => { const ex = amount * x.sisa / avail, fl = Math.floor(ex); return {s:x.s, amt:fl, frac:ex - fl, sisa:x.sisa}; });
+  let rest = amount - parts.reduce((a, p) => a + p.amt, 0);
+  parts.slice().sort((a, b) => b.frac - a.frac).forEach(p => { if(rest > 0 && p.amt < p.sisa){ p.amt++; rest--; } });
+  return {ok:true, avail, parts:parts.filter(p => p.amt > 0).map(p => ({sub:p.s.id, name:p.s.cat + ' › ' + p.s.name, amount:p.amt}))};
+}
+function targetOptions(list, sel){
+  const m = spentMap(), by = new Map();
+  for(const s of list){ if(!by.has(s.cat)) by.set(s.cat, []); by.get(s.cat).push(s); }
+  let out = list.length > 1 ? '<option value="">Pilih sub-kategori…</option>' : '';
+  for(const [cat, l] of by) out += `<optgroup label="${esc(cat)}">` + l.map(s => `<option value="${esc(s.id)}"${s.id === sel ? ' selected' : ''}>${esc(s.name)} · budget ${rp(s.budget)}</option>`).join('') + '</optgroup>';
+  return out;
+}
+function sourceOptions(tid, sel){
+  const m = spentMap(), by = new Map();
+  for(const s of S.subs){ if(!by.has(s.cat)) by.set(s.cat, []); by.get(s.cat).push(s); }
+  let out = '<option value="">Pilih sumber dana…</option>';
+  for(const [cat, l] of by){
+    const els = l.filter(s => s.id !== tid); if(!els.length) continue;
+    const tot = els.reduce((a, s) => a + Math.max(0, s.budget - (m[s.id] || 0)), 0);
+    out += `<optgroup label="${esc(cat)}"><option value="cat:${esc(cat)}"${sel === 'cat:' + cat ? ' selected' : ''}>Semua ${esc(cat)} · sisa ${rp(tot)}</option>` +
+      els.map(s => `<option value="sub:${esc(s.id)}"${sel === 'sub:' + s.id ? ' selected' : ''}>${esc(s.name)} · sisa ${rp(s.budget - (m[s.id] || 0))}</option>`).join('') + '</optgroup>';
+  }
+  return out;
+}
+function moveSheet(tCat, tSub){
+  const targets = S.subs.filter(s => tSub ? s.id === tSub : tCat ? s.cat === tCat : true);
+  const pre = targets.length === 1 ? targets[0].id : '';
+  openSheet(`<h2>Tambah atau pindahkan dana</h2>
+    <p class="mv-hint">Dana ditambahkan ke satu sub-kategori dengan mengambil budget dari yang lain. Total budget tidak berubah, dan hanya sisa dana (belum terpakai) yang bisa diambil.</p>
+    <form id="mf" novalidate>
+    <div class="fld" id="m_f-to"><label for="m_to"><span>Tambah dana ke</span></label><select id="m_to">${targetOptions(targets, pre)}</select><p class="ferr" hidden></p></div>
+    <div class="fld" id="m_f-from"><label for="m_from"><span>Ambil dari</span></label><select id="m_from">${sourceOptions(pre, '')}</select><p class="ferr" hidden></p></div>
+    <div class="fld" id="m_f-amt"><label for="m_amt"><span>Jumlah</span></label><div class="money"><i>Rp</i><input id="m_amt" type="text" inputmode="numeric" autocomplete="off" placeholder="0"></div><button type="button" class="btn ghost sm" id="m_max" style="margin-top:8px">Ambil semua sisa</button><p class="ferr" hidden></p></div>
+    <div id="m_prev" class="gauge" role="status"></div>
+    <div class="btnrow"><button type="button" class="btn ghost" data-c>Batal</button><button class="btn" type="submit">Pindahkan</button></div></form>`,
+  p => {
+    const g = id => document.getElementById('m_' + id);
+    const info = (cls, ic, html) => { g('prev').className = 'gauge ' + cls; g('prev').innerHTML = `<div class="msg"><span class="ic" aria-hidden="true">${ic}</span><div>${html}</div></div>`; };
+    const upd = () => {
+      const tid = g('to').value, src = g('from').value, amt = parseMoney(g('amt').value);
+      if(!tid || !src) return info('', 'i', 'Pilih tujuan dan sumber dana.');
+      const pl = planMove(src, tid, amt), t = subById(tid);
+      if(!amt) return info('', 'i', `Dana yang bisa diambil dari sumber ini: <b>${rp(pl.avail)}</b>`);
+      if(!pl.ok) return info('bad', '✕', `Sisa dana sumber kurang <b>${rp(pl.short)}</b>. Yang bisa diambil hanya ${rp(pl.avail)}.`);
+      info('ok', '✓', `<b>${esc(t.name)}</b>: ${rp(t.budget)} → <b>${rp(t.budget + amt)}</b>` +
+        pl.parts.map(x => { const b = subById(x.sub).budget; return `<br>${esc(x.name)}: ${rp(b)} → ${rp(b - x.amount)}`; }).join(''));
+    };
+    g('to').addEventListener('change', () => { const cur = g('from').value; g('from').innerHTML = sourceOptions(g('to').value, cur); clearErr('m_', 'to'); upd(); });
+    g('from').addEventListener('change', () => { clearErr('m_', 'from'); upd(); });
+    g('amt').addEventListener('input', () => { const n = parseMoney(g('amt').value); g('amt').value = n ? fmtNum(n) : ''; clearErr('m_', 'amt'); upd(); });
+    g('max').onclick = () => {
+      if(!g('to').value || !g('from').value){ toast('Pilih tujuan dan sumber dulu', 'err'); return; }
+      const a = planMove(g('from').value, g('to').value, 0).avail; g('amt').value = a ? fmtNum(a) : ''; upd();
+    };
+    $('[data-c]', p).onclick = () => closeSheet();
+    $('#mf', p).addEventListener('submit', e => {
+      e.preventDefault();
+      const tid = g('to').value, src = g('from').value, amt = parseMoney(g('amt').value);
+      if(!tid) return showErr('m_', 'to', 'Pilih sub-kategori tujuan.');
+      if(!src) return showErr('m_', 'from', 'Pilih sumber dana.');
+      if(!amt) return showErr('m_', 'amt', 'Isi jumlah lebih dari 0.');
+      const pl = planMove(src, tid, amt);
+      if(!pl.ok) return showErr('m_', 'amt', 'Sisa dana sumber tidak cukup. Maksimal ' + rp(pl.avail) + '.');
+      const t = subById(tid), total = pl.parts.reduce((a, x) => a + x.amount, 0);
+      for(const x of pl.parts) subById(x.sub).budget -= x.amount;
+      t.budget += total;
+      S.moves.unshift({id:uid(), ts:Date.now(), date:today(), amount:total, to:tid, toName:t.cat + ' › ' + t.name, parts:pl.parts});
+      if(S.moves.length > 200) S.moves.length = 200;
+      save(); syncFull(); closeSheet(); toast('Dana dipindahkan: ' + rp(total)); render(true);
+    });
+    upd();
+  });
+}
+function moveHistory(){
+  const h = S.moves.slice(0, 8); if(!h.length) return '';
+  return `<div class="sec"><h2>Pemindahan dana terakhir</h2></div>` + h.map(mv => `<article class="tx"><div class="tx-top"><span class="tx-name">${esc(mv.toName)}</span><span class="tx-amt">+${rp(mv.amount)}</span></div>
+    <div class="tx-meta"><small>Dari ${esc(mv.parts.map(x => x.name + ' ' + rp(x.amount)).join(', '))} · ${esc(fmtDate(mv.date))}</small><span class="tx-acts"><button class="btn ghost sm" data-undo="${esc(mv.id)}">Batalkan</button></span></div></article>`).join('');
+}
+async function undoMove(id){
+  const mv = S.moves.find(x => x.id === id); if(!mv) return;
+  if(!subById(mv.to) || mv.parts.some(x => !subById(x.sub))){ toast('Tidak bisa dibatalkan: ada sub-kategori yang sudah dihapus', 'err'); return; }
+  if(sisaOf(mv.to) < mv.amount){ toast('Tidak bisa dibatalkan: dana tujuan sudah terpakai', 'err'); return; }
+  if(!(await ask({title:'Batalkan pemindahan?', msg:`${rp(mv.amount)} dikembalikan ke sumber semula dan dikurangi dari <b>${esc(mv.toName)}</b>.`, ok:'Batalkan', danger:true}))) return;
+  for(const x of mv.parts) subById(x.sub).budget += x.amount;
+  subById(mv.to).budget -= mv.amount;
+  S.moves = S.moves.filter(x => x.id !== id);
+  save(); syncFull(); toast('Pemindahan dibatalkan'); render(true);
 }
 
 /* --- Pembelian --- */
@@ -524,7 +731,7 @@ function editTx(id){
         const v = get(), bad = validateTx(v);
         if(bad){ showErr('e_', bad[0], bad[1]); return; }
         if(!(await confirmOverspend(v, id))) return;
-        Object.assign(t, v); save(); closeSheet(); toast('Perubahan disimpan'); render(true);
+        Object.assign(t, v); save(); syncPut(t); closeSheet(); toast('Perubahan disimpan'); render(true);
       });
     });
 }
@@ -532,7 +739,7 @@ async function deleteTx(id){
   const t = S.tx.find(x => x.id === id); if(!t) return;
   const ok = await ask({title:'Hapus pembelian?', msg:`<b>${esc(t.name)}</b> (${rp(t.amount)}) akan dihapus dan sisa dana dihitung ulang.`, ok:'Hapus', danger:true});
   if(!ok) return;
-  S.tx = S.tx.filter(x => x.id !== id); save(); toast('Pembelian dihapus'); render(true);
+  S.tx = S.tx.filter(x => x.id !== id); save(); syncDel(id); toast('Pembelian dihapus'); render(true);
 }
 
 /* --- Pengaturan --- */
@@ -566,6 +773,7 @@ function viewPengaturan(){
     </div>
     <p class="hint">Format kolom: kategori, subkategori, budget. Impor memperbarui yang sudah ada dan menambah yang baru, tanpa menghapus apa pun.</p>
   </section>
+  ${syncSection()}
   <section class="card"><h2>Cadangan data</h2>
     <p class="hint" style="margin:0 0 10px">Data tersimpan di browser HP ini saja. Terakhir dicadangkan: ${esc(last)}.</p>
     <div class="list-btns">
@@ -586,28 +794,27 @@ function refreshTotals(){
   $('#tb').textContent = rp(c.totalBudget); $('#tt').textContent = rp(S.income - c.totalBudget);
 }
 function initPengaturan(){
+  initSync();
   const money = el => el.addEventListener('input', () => { const n = parseMoney(el.value); el.value = n ? fmtNum(n) : ''; });
   const inc = $('#inc'); money(inc);
-  inc.addEventListener('input', () => { S.income = parseMoney(inc.value); refreshTotals(); });
-  inc.addEventListener('change', () => { S.income = parseMoney(inc.value); save(); refreshTotals(); toast('Pemasukan disimpan'); });
-  $('#ps').addEventListener('change', e => { S.period.start = isDate(e.target.value) ? e.target.value : ''; save(); toast('Periode disimpan'); });
-  $('#pe').addEventListener('change', e => { S.period.end = isDate(e.target.value) ? e.target.value : ''; save(); toast('Periode disimpan'); });
+  inc.addEventListener('change', () => { S.income = parseMoney(inc.value); save(); syncFull(); refreshTotals(); toast('Pemasukan disimpan'); });
+  $('#ps').addEventListener('change', e => { S.period.start = isDate(e.target.value) ? e.target.value : ''; save(); syncFull(); toast('Periode disimpan'); });
+  $('#pe').addEventListener('change', e => { S.period.end = isDate(e.target.value) ? e.target.value : ''; save(); syncFull(); toast('Periode disimpan'); });
   document.querySelectorAll('[data-b]').forEach(el => {
     money(el);
-    el.addEventListener('input', () => { const s = subById(el.dataset.b); if(s){ s.budget = parseMoney(el.value); refreshTotals(); } });
-    el.addEventListener('change', () => { const s = subById(el.dataset.b); s.budget = parseMoney(el.value); save(); refreshTotals(); toast('Budget disimpan'); });
+    el.addEventListener('change', () => { const s = subById(el.dataset.b); s.budget = parseMoney(el.value); save(); syncFull(); refreshTotals(); toast('Budget disimpan'); });
   });
   document.querySelectorAll('[data-rm]').forEach(b => b.onclick = async () => {
     const s = subById(b.dataset.rm);
     if(!(await ask({title:'Hapus sub-kategori?', msg:`<b>${esc(s.cat)} › ${esc(s.name)}</b> akan dihapus dari budget.`, ok:'Hapus', danger:true}))) return;
-    S.subs = S.subs.filter(x => x.id !== s.id); save(); toast('Sub-kategori dihapus'); render(true);
+    S.subs = S.subs.filter(x => x.id !== s.id); save(); syncFull(); toast('Sub-kategori dihapus'); render(true);
   });
   money($('#nb'));
   $('#addsub').onclick = () => {
     const cat = $('#nc').value.trim(), name = $('#nn').value.trim(), b = parseMoney($('#nb').value);
     if(!cat || !name){ toast('Isi kategori dan nama sub-kategori', 'err'); return; }
     if(findSub(cat, name)){ toast('Sub-kategori itu sudah ada', 'err'); return; }
-    addSub(cat, name, b); save(); toast('Sub-kategori ditambahkan'); render(true);
+    addSub(cat, name, b); save(); syncFull(); toast('Sub-kategori ditambahkan'); render(true);
   };
   $('#csvfile').addEventListener('change', async e => { const f = e.target.files[0]; if(f) await importBudgetText(await f.text()); e.target.value = ''; });
   $('#csvpaste').onclick = () => openSheet(`<h2>Tempel dari spreadsheet</h2><p class="hint" style="margin:0 0 8px">Tiga kolom: kategori, subkategori, budget. Baris judul boleh disertakan.</p><textarea id="pt" rows="8" placeholder="Meals&#9;Groceries&#9;5000000" style="min-height:160px"></textarea><div class="btnrow"><button class="btn ghost" data-c>Batal</button><button class="btn" data-ok>Lanjut</button></div>`,
@@ -621,10 +828,10 @@ function initPengaturan(){
     if(!o.subs.length && !o.tx.length){ toast('File cadangan kosong atau bukan cadangan aplikasi ini', 'err'); return; }
     const ok = await ask({title:'Pulihkan cadangan?', msg:`Seluruh data saat ini akan diganti dengan cadangan: ${o.subs.length} sub-kategori dan ${o.tx.length} pembelian${lastDropped ? ` (${lastDropped} baris tidak valid dilewati)` : ''}.`, ok:'Pulihkan', danger:true});
     if(!ok) return;
-    S = o; save(); toast('Data dipulihkan'); render(true);
+    S = o; save(); syncFull(); toast('Data dipulihkan'); render(true);
   });
-  $('#clrtx').onclick = async () => { if(!S.tx.length){ toast('Belum ada pembelian'); return; } if(await ask({title:'Hapus semua pembelian?', msg:`${S.tx.length} pembelian akan dihapus. Budget tetap ada.`, ok:'Hapus semua', danger:true})){ S.tx = []; save(); toast('Semua pembelian dihapus'); render(true); } };
-  $('#clrall').onclick = async () => { if(await ask({title:'Hapus semua data?', msg:'Budget, pemasukan, dan semua pembelian akan dihapus dari HP ini. Unduh cadangan dulu jika perlu.', ok:'Hapus semua', danger:true})){ S = load.blank(); save(); toast('Semua data dihapus'); render(true); } };
+  $('#clrtx').onclick = async () => { if(!S.tx.length){ toast('Belum ada pembelian'); return; } if(await ask({title:'Hapus semua pembelian?', msg:`${S.tx.length} pembelian akan dihapus. Budget tetap ada.`, ok:'Hapus semua', danger:true})){ S.tx = []; save(); syncFull(); toast('Semua pembelian dihapus'); render(true); } };
+  $('#clrall').onclick = async () => { if(await ask({title:'Hapus semua data?', msg:'Budget, pemasukan, dan semua pembelian akan dihapus dari HP ini. Unduh cadangan dulu jika perlu.', ok:'Hapus semua', danger:true})){ S = load.blank(); save(); syncFull(); toast('Semua data dihapus'); render(true); } };
 }
 load.blank = () => { const o = blank(); const n = new Date(); o.period.start = iso(new Date(n.getFullYear(), n.getMonth(), 1)); o.period.end = iso(new Date(n.getFullYear(), n.getMonth() + 1, 0)); return o; };
 
@@ -681,7 +888,7 @@ async function importBudgetText(text){
   const ok = await ask({title:'Impor budget?', msg:`${upd} sub-kategori diperbarui dan ${add} ditambahkan${skipped ? `. ${skipped} baris dilewati karena tidak lengkap` : ''}.`, ok:'Impor'});
   if(!ok) return;
   for(const p of plan){ const s = findSub(p.cat, p.name); if(s) s.budget = p.budget; else addSub(p.cat, p.name, p.budget); }
-  save(); toast('Budget diimpor'); render(true);
+  save(); syncFull(); toast('Budget diimpor'); render(true);
 }
 
 /* ========== router ========== */
@@ -691,6 +898,7 @@ function render(keepScroll){
   $('#view').innerHTML = routes[cur]();
   document.querySelectorAll('#nav a').forEach(a => { if(a.dataset.r === cur) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
   inits[cur]();
+  syncUI();
   window.scrollTo(0, keepScroll ? y : 0);
 }
 function route(){
@@ -704,6 +912,8 @@ $('#view').addEventListener('toggle', e => {
 }, true);
 window.addEventListener('hashchange', route);
 route();
+syncFlush(); window.addEventListener('online', syncFlush);
+document.addEventListener('visibilitychange', () => { if(!document.hidden) syncFlush(); });
 try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist(); }catch(e){}
 if('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
